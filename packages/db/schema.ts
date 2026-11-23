@@ -456,6 +456,44 @@ export const highlights = sqliteTable(
   ],
 );
 
+// Append-only audit trail of changes to a bookmark. Each row is one changed
+// field, one attached/detached tag, or one list the bookmark joined/left.
+export const bookmarkHistory = sqliteTable(
+  "bookmarkHistory",
+  {
+    id: text("id")
+      .notNull()
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    bookmarkId: text("bookmarkId")
+      .notNull()
+      .references(() => bookmarks.id, { onDelete: "cascade" }),
+    // Who made the change. Null for system changes (AI, rules) or once the
+    // acting user is deleted, so the history outlives the account.
+    userId: text("userId").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    source: text("source", { enum: ["user", "ai", "rule"] }).notNull(),
+    // A bookmark field name (e.g. "title"), or "tags" / "lists".
+    field: text("field").notNull(),
+    // The tag or list id for "tags" / "lists" rows. Kept without a foreign key
+    // so the entry survives the tag or list being deleted.
+    refId: text("refId"),
+    // Values are stored as display strings; null means "unset" (or, for tags
+    // and lists, "not attached" on that side of the change).
+    oldValue: text("oldValue"),
+    newValue: text("newValue"),
+    // Millisecond precision keeps edits made in the same second in order.
+    createdAt: createdAtMsField(),
+  },
+  (tb) => [
+    index("bookmarkHistory_bookmarkId_createdAt_idx").on(
+      tb.bookmarkId,
+      tb.createdAt,
+    ),
+  ],
+);
+
 export const userReadingProgress = sqliteTable(
   "userReadingProgress",
   {

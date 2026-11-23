@@ -98,6 +98,18 @@ const HYBRID_CANDIDATES_PER_SOURCE = MAX_NUM_BOOKMARKS_PER_PAGE;
  */
 const SEMANTIC_SCORE_THRESHOLD = 0.6;
 
+// Bookmark date columns are stored with second precision, so history compares
+// and records dates the way they'll be read back instead of with the
+// milliseconds the database drops.
+function atStoredPrecision<T extends Record<string, unknown>>(data: T): T {
+  return Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [
+      k,
+      v instanceof Date ? new Date(Math.floor(v.getTime() / 1000) * 1000) : v,
+    ]),
+  ) as T;
+}
+
 export const ensureBookmarkOwnership = experimental_trpcMiddleware<{
   ctx: AuthedContext;
   input: { bookmarkId: string };
@@ -629,7 +641,12 @@ export const bookmarksAppRouter = router({
             .from(bookmarkLinks)
             .where(eq(bookmarkLinks.id, input.bookmarkId))
             .get();
-          changes.push(...diffBookmarkFields(before ?? {}, linkUpdateData));
+          changes.push(
+            ...diffBookmarkFields(
+              before ?? {},
+              atStoredPrecision(linkUpdateData),
+            ),
+          );
           const result = tx
             .update(bookmarkLinks)
             .set(linkUpdateData)
@@ -740,7 +757,12 @@ export const bookmarksAppRouter = router({
             .get();
           // modifiedAt is bookkeeping, not a user edit, so it's never recorded.
           const { modifiedAt: _modifiedAt, ...commonFields } = commonUpdateData;
-          changes.push(...diffBookmarkFields(before ?? {}, commonFields));
+          changes.push(
+            ...diffBookmarkFields(
+              before ?? {},
+              atStoredPrecision(commonFields),
+            ),
+          );
           tx.update(bookmarks)
             .set(commonUpdateData)
             .where(

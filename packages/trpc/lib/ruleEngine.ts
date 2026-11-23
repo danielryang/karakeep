@@ -293,12 +293,12 @@ export class RuleEngine {
       }
       case "addToList": {
         const list = await List.fromId(this.ctx, action.listId);
-        await list.addBookmark(this.bookmark.id);
+        await list.addBookmark(this.bookmark.id, "rule");
         return `Added to list ${action.listId}`;
       }
       case "removeFromList": {
         const list = await List.fromId(this.ctx, action.listId);
-        await list.removeBookmark(this.bookmark.id);
+        await list.removeBookmark(this.bookmark.id, "rule");
         return `Removed from list ${action.listId}`;
       }
       case "downloadFullPageArchive": {

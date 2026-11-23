@@ -1,7 +1,12 @@
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, test } from "vitest";
 
-import { bookmarkHistory, bookmarks } from "@karakeep/db/schema";
+import {
+  bookmarkHistory,
+  bookmarks,
+  bookmarkTags,
+  tagsOnBookmarks,
+} from "@karakeep/db/schema";
 import { BookmarkTypes } from "@karakeep/shared/types/bookmarks";
 
 import type { APICallerType, CustomTestContext, TestDB } from "../testUtils";
@@ -172,5 +177,251 @@ describe("bookmark history: tags", () => {
     ]);
     // One edit, one timestamp.
     expect(new Set(rows.map((r) => r.createdAt.getTime())).size).toBe(1);
+  });
+
+  test<CustomTestContext>("attaching by name reuses an existing tag", async ({
+    apiCallers,
+    db,
+  }) => {
+    const api = apiCallers[0];
+    const { id: tagId } = await api.tags.create({ name: "existing" });
+    const bookmarkId = await createBookmark(api);
+
+    await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [{ tagName: "existing" }],
+      detach: [],
+    });
+
+    const rows = await tagHistory(db, bookmarkId);
+    expect(rows).toEqual([
+      expect.objectContaining({ refId: tagId, newValue: "existing" }),
+    ]);
+    expect(await db.select().from(bookmarkTags)).toHaveLength(1);
+  });
+
+  test<CustomTestContext>("several attaches and detaches get one row each", async ({
+    apiCallers,
+    db,
+  }) => {
+    const api = apiCallers[0];
+    const bookmarkId = await createBookmark(api);
+    await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [{ tagName: "a" }, { tagName: "b" }, { tagName: "c" }],
+      detach: [],
+    });
+    const before = await tagHistory(db, bookmarkId);
+    const tagA = (await api.bookmarks.getBookmark({ bookmarkId })).tags.find(
+      (t) => t.name === "a",
+    )!;
+
+    await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [{ tagName: "d" }, { tagName: "e" }],
+      detach: [{ tagId: tagA.id }, { tagName: "b" }],
+    });
+
+    const rows = (await tagHistory(db, bookmarkId)).filter(
+      (r) => !before.some((b) => b.id === r.id),
+    );
+    expect(summarize(rows)).toEqual([
+      { oldValue: "a", newValue: null },
+      { oldValue: "b", newValue: null },
+      { oldValue: null, newValue: "d" },
+      { oldValue: null, newValue: "e" },
+    ]);
+    expect(new Set(rows.map((r) => r.createdAt.getTime())).size).toBe(1);
+  });
+
+  // updateTags detaches before attaching, so a tag in both lists ends up
+  // attached; history must agree with that final state.
+  test<CustomTestContext>("a tag in both attach and detach matches the final state", async ({
+    apiCallers,
+    db,
+  }) => {
+    const api = apiCallers[0];
+    const bookmarkId = await createBookmark(api);
+    const { id: kept } = await api.tags.create({ name: "kept" });
+    const { id: fresh } = await api.tags.create({ name: "fresh" });
+    await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [{ tagId: kept }],
+      detach: [],
+    });
+
+    await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [{ tagId: kept }, { tagId: fresh }],
+      detach: [{ tagId: kept }, { tagId: fresh }],
+    });
+
+    const tags = (await api.bookmarks.getBookmark({ bookmarkId })).tags;
+    expect(tags.map((t) => t.name).sort()).toEqual(["fresh", "kept"]);
+    // "kept" was attached throughout; "fresh" was newly attached.
+    expect(summarize(await tagHistory(db, bookmarkId))).toEqual([
+      { oldValue: null, newValue: "fresh" },
+      { oldValue: null, newValue: "kept" },
+    ]);
+  });
+
+  test<CustomTestContext>("empty attach and detach record nothing", async ({
+    apiCallers,
+    db,
+  }) => {
+    const api = apiCallers[0];
+    const bookmarkId = await createBookmark(api);
+
+    const res = await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [],
+      detach: [],
+    });
+
+    expect(res).toEqual({ attached: [], detached: [] });
+    expect(await tagHistory(db, bookmarkId)).toEqual([]);
+  });
+
+  test<CustomTestContext>("returns requested ids, including no-ops", async ({
+    apiCallers,
+  }) => {
+    const api = apiCallers[0];
+    const bookmarkId = await createBookmark(api);
+    const { id: attachedId } = await api.tags.create({ name: "attached" });
+    const { id: neverId } = await api.tags.create({ name: "never" });
+    await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [{ tagId: attachedId }],
+      detach: [],
+    });
+
+    const res = await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [{ tagId: attachedId }],
+      detach: [{ tagId: neverId }],
+    });
+
+    expect(res).toEqual({ attached: [attachedId], detached: [neverId] });
+  });
+
+  test<CustomTestContext>("rows keep the tag name after rename and delete", async ({
+    apiCallers,
+    db,
+  }) => {
+    const api = apiCallers[0];
+    const bookmarkId = await createBookmark(api);
+    const { id: tagId } = await api.tags.create({ name: "original" });
+    await api.bookmarks.updateTags({
+      bookmarkId,
+      attach: [{ tagId }],
+      detach: [],
+    });
+
+    await api.tags.update({ tagId, name: "renamed" });
+    expect(await tagHistory(db, bookmarkId)).toEqual([
+      expect.objectContaining({ refId: tagId, newValue: "original" }),
+    ]);
+
+    await api.tags.delete({ tagId });
+    expect(await tagHistory(db, bookmarkId)).toEqual([
+      expect.objectContaining({ refId: tagId, newValue: "original" }),
+    ]);
+  });
+
+  test<CustomTestContext>("history and tag write roll back together", async ({
+    apiCallers,
+    db,
+  }) => {
+    const api = apiCallers[0];
+    const bookmarkId = await createBookmark(api);
+    db.run(
+      sql`CREATE TRIGGER fail_history BEFORE INSERT ON bookmarkHistory BEGIN SELECT RAISE(ABORT, 'history failed'); END`,
+    );
+
+    await expect(
+      api.bookmarks.updateTags({
+        bookmarkId,
+        attach: [{ tagName: "doomed" }],
+        detach: [],
+      }),
+    ).rejects.toThrow("history failed");
+
+    expect(
+      await db
+        .select()
+        .from(tagsOnBookmarks)
+        .where(eq(tagsOnBookmarks.bookmarkId, bookmarkId)),
+    ).toEqual([]);
+  });
+
+  describe("authorization", () => {
+    async function attachedTagIds(db: TestDB, bookmarkId: string) {
+      return (
+        await db
+          .select()
+          .from(tagsOnBookmarks)
+          .where(eq(tagsOnBookmarks.bookmarkId, bookmarkId))
+      ).map((t) => t.tagId);
+    }
+
+    test<CustomTestContext>("another user can't update tags", async ({
+      apiCallers,
+      db,
+    }) => {
+      const bookmarkId = await createBookmark(apiCallers[0]);
+      const { id: tagId } = await apiCallers[1].tags.create({ name: "theirs" });
+
+      await expect(
+        apiCallers[1].bookmarks.updateTags({
+          bookmarkId,
+          attach: [{ tagId }, { tagName: "intruder" }],
+          detach: [],
+        }),
+      ).rejects.toThrow("Bookmark not found");
+
+      expect(await attachedTagIds(db, bookmarkId)).toEqual([]);
+      expect(await tagHistory(db, bookmarkId)).toEqual([]);
+    });
+
+    for (const role of ["viewer", "editor"] as const) {
+      test<CustomTestContext>(`a list ${role} can't update tags`, async ({
+        apiCallers,
+        db,
+      }) => {
+        const [owner, collaborator] = apiCallers;
+        const bookmarkId = await createBookmark(owner);
+        await owner.bookmarks.updateTags({
+          bookmarkId,
+          attach: [{ tagName: "owned" }],
+          detach: [],
+        });
+        const ownedTagId = (await attachedTagIds(db, bookmarkId))[0];
+        const list = await owner.lists.create({
+          name: "Shared",
+          icon: "📚",
+          type: "manual",
+        });
+        await owner.lists.addToList({ listId: list.id, bookmarkId });
+        const { invitationId } = await owner.lists.addCollaborator({
+          listId: list.id,
+          email: (await collaborator.users.whoami()).email!,
+          role,
+        });
+        await collaborator.lists.acceptInvitation({ invitationId });
+        // The collaborator can see the bookmark, just not change its tags.
+        await collaborator.bookmarks.getBookmark({ bookmarkId });
+
+        await expect(
+          collaborator.bookmarks.updateTags({
+            bookmarkId,
+            attach: [{ tagName: "collab" }],
+            detach: [{ tagId: ownedTagId }],
+          }),
+        ).rejects.toThrow("User is not allowed to access resource");
+
+        expect(await attachedTagIds(db, bookmarkId)).toEqual([ownedTagId]);
+        expect(await tagHistory(db, bookmarkId)).toHaveLength(1);
+      });
+    }
   });
 });

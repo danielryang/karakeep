@@ -413,7 +413,8 @@ async function inferTags(
   }
 }
 
-async function connectTags(
+// Exported for tests.
+export async function connectTags(
   bookmarkId: string,
   inferredTags: string[],
   userId: string,

@@ -122,6 +122,10 @@ export function useUpdateBookmark(
         queryClient.invalidateQueries(
           api.bookmarks.getBookmark.queryFilter({ bookmarkId: req.bookmarkId }),
         );
+        // Edits add history entries, so refresh the history panel too.
+        queryClient.invalidateQueries(
+          api.bookmarks.getHistory.queryFilter({ bookmarkId: req.bookmarkId }),
+        );
         scheduleInvalidateQueries(queryClient, api.lists.stats.pathFilter());
         return opts?.onSuccess?.(res, req, meta, context);
       },
@@ -202,6 +206,10 @@ export function useUpdateBookmarkTags(
       onSuccess: (res, req, meta, context) => {
         queryClient.invalidateQueries(
           api.bookmarks.getBookmark.queryFilter({ bookmarkId: req.bookmarkId }),
+        );
+        // Edits add history entries, so refresh the history panel too.
+        queryClient.invalidateQueries(
+          api.bookmarks.getHistory.queryFilter({ bookmarkId: req.bookmarkId }),
         );
 
         [...res.attached, ...res.detached].forEach((id) => {

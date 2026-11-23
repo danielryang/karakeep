@@ -107,6 +107,10 @@ export function useAddBookmarkToList(
             bookmarkId: req.bookmarkId,
           }),
         );
+        // Edits add history entries, so refresh the history panel too.
+        queryClient.invalidateQueries(
+          api.bookmarks.getHistory.queryFilter({ bookmarkId: req.bookmarkId }),
+        );
         scheduleInvalidateQueries(queryClient, api.lists.stats.pathFilter());
         return opts?.onSuccess?.(res, req, meta, context);
       },
@@ -137,6 +141,10 @@ export function useRemoveBookmarkFromList(
           api.lists.getListsOfBookmark.queryFilter({
             bookmarkId: req.bookmarkId,
           }),
+        );
+        // Edits add history entries, so refresh the history panel too.
+        queryClient.invalidateQueries(
+          api.bookmarks.getHistory.queryFilter({ bookmarkId: req.bookmarkId }),
         );
         scheduleInvalidateQueries(queryClient, api.lists.stats.pathFilter());
         return opts?.onSuccess?.(res, req, meta, context);

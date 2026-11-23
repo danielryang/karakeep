@@ -76,6 +76,11 @@ import {
   emitRateLimitedEvent,
   router,
 } from "../index";
+import type { BookmarkHistoryChange } from "../lib/bookmarkHistory";
+import {
+  diffBookmarkFields,
+  recordBookmarkHistory,
+} from "../lib/bookmarkHistory";
 import { RuleEngine } from "../lib/ruleEngine";
 import { getBookmarkIdsFromMatcher } from "../lib/search";
 import { reciprocalRankFusion } from "../lib/searchRanking";
@@ -92,6 +97,18 @@ const HYBRID_CANDIDATES_PER_SOURCE = MAX_NUM_BOOKMARKS_PER_PAGE;
  * `(1 + cosine) / 2`), so this drops anything below ~0.2 cosine similarity.
  */
 const SEMANTIC_SCORE_THRESHOLD = 0.6;
+
+// Bookmark date columns are stored with second precision, so history compares
+// and records dates the way they'll be read back instead of with the
+// milliseconds the database drops.
+function atStoredPrecision<T extends Record<string, unknown>>(data: T): T {
+  return Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [
+      k,
+      v instanceof Date ? new Date(Math.floor(v.getTime() / 1000) * 1000) : v,
+    ]),
+  ) as T;
+}
 
 export const ensureBookmarkOwnership = experimental_trpcMiddleware<{
   ctx: AuthedContext;
@@ -585,6 +602,10 @@ export const bookmarksAppRouter = router({
     .mutation(async ({ input, ctx }) => {
       await ctx.db.transaction((tx) => {
         let somethingChanged = false;
+        // Each section diffs against the row as it is before its write, and
+        // everything is recorded at the end of this transaction so a thrown
+        // BAD_REQUEST below leaves no history behind.
+        const changes: BookmarkHistoryChange[] = [];
 
         // Update link-specific fields if any are provided
         const linkUpdateData: Partial<{
@@ -615,6 +636,17 @@ export const bookmarksAppRouter = router({
         }
 
         if (Object.keys(linkUpdateData).length > 0) {
+          const before = tx
+            .select()
+            .from(bookmarkLinks)
+            .where(eq(bookmarkLinks.id, input.bookmarkId))
+            .get();
+          changes.push(
+            ...diffBookmarkFields(
+              before ?? {},
+              atStoredPrecision(linkUpdateData),
+            ),
+          );
           const result = tx
             .update(bookmarkLinks)
             .set(linkUpdateData)
@@ -631,6 +663,14 @@ export const bookmarksAppRouter = router({
         }
 
         if (input.text) {
+          const before = tx
+            .select({ text: bookmarkTexts.text })
+            .from(bookmarkTexts)
+            .where(eq(bookmarkTexts.id, input.bookmarkId))
+            .get();
+          changes.push(
+            ...diffBookmarkFields(before ?? {}, { text: input.text }),
+          );
           const result = tx
             .update(bookmarkTexts)
             .set({
@@ -650,6 +690,16 @@ export const bookmarksAppRouter = router({
         }
 
         if (input.assetContent !== undefined) {
+          const before = tx
+            .select({ assetContent: bookmarkAssets.content })
+            .from(bookmarkAssets)
+            .where(eq(bookmarkAssets.id, input.bookmarkId))
+            .get();
+          changes.push(
+            ...diffBookmarkFields(before ?? {}, {
+              assetContent: input.assetContent,
+            }),
+          );
           const result = tx
             .update(bookmarkAssets)
             .set({
@@ -700,6 +750,19 @@ export const bookmarksAppRouter = router({
         }
 
         if (Object.keys(commonUpdateData).length > 1 || somethingChanged) {
+          const before = tx
+            .select()
+            .from(bookmarks)
+            .where(eq(bookmarks.id, input.bookmarkId))
+            .get();
+          // modifiedAt is bookkeeping, not a user edit, so it's never recorded.
+          const { modifiedAt: _modifiedAt, ...commonFields } = commonUpdateData;
+          changes.push(
+            ...diffBookmarkFields(
+              before ?? {},
+              atStoredPrecision(commonFields),
+            ),
+          );
           tx.update(bookmarks)
             .set(commonUpdateData)
             .where(
@@ -710,6 +773,12 @@ export const bookmarksAppRouter = router({
             )
             .run();
         }
+
+        recordBookmarkHistory(
+          tx,
+          { bookmarkId: input.bookmarkId, userId: ctx.user.id, source: "user" },
+          changes,
+        );
       });
 
       // Refetch the updated bookmark data to return the full object
@@ -780,6 +849,11 @@ export const bookmarksAppRouter = router({
     .use(ensureBookmarkOwnership)
     .mutation(async ({ input, ctx }) => {
       await ctx.db.transaction((tx) => {
+        const before = tx
+          .select({ text: bookmarkTexts.text })
+          .from(bookmarkTexts)
+          .where(eq(bookmarkTexts.id, input.bookmarkId))
+          .get();
         const res = tx
           .update(bookmarkTexts)
           .set({
@@ -803,6 +877,11 @@ export const bookmarksAppRouter = router({
             ),
           )
           .run();
+        recordBookmarkHistory(
+          tx,
+          { bookmarkId: input.bookmarkId, userId: ctx.user.id, source: "user" },
+          diffBookmarkFields(before ?? {}, { text: input.text }),
+        );
       });
       await Promise.all([
         triggerSearchReindex(input.bookmarkId, {

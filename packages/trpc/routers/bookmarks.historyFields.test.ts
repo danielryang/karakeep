@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, notInArray } from "drizzle-orm";
 import { beforeEach, describe, expect, test } from "vitest";
 
 import {
@@ -16,11 +16,18 @@ beforeEach<CustomTestContext>(defaultBeforeEach(true));
 type DB = CustomTestContext["db"];
 type BookmarksApi = APICallerType["bookmarks"];
 
+// Field edits only: test setup (e.g. adding to a shared list) can write tag or
+// list history once those are captured, and that isn't what these tests check.
 async function historyFor(db: DB, bookmarkId: string) {
   return db
     .select()
     .from(bookmarkHistory)
-    .where(eq(bookmarkHistory.bookmarkId, bookmarkId))
+    .where(
+      and(
+        eq(bookmarkHistory.bookmarkId, bookmarkId),
+        notInArray(bookmarkHistory.field, ["tags", "lists"]),
+      ),
+    )
     .orderBy(asc(bookmarkHistory.field));
 }
 

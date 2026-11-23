@@ -1031,6 +1031,14 @@ export const bookmarksAppRouter = router({
   getHistory: bookmarksProcedure
     .input(z.object({ bookmarkId: z.string() }))
     .output(z.array(zBookmarkHistoryEntrySchema))
+    // Only enforced when RATE_LIMITING_ENABLED is on.
+    .use(
+      createRateLimitMiddleware({
+        name: "bookmarks.getHistory",
+        windowMs: 60 * 1000,
+        maxRequests: 30,
+      }),
+    )
     .use(ensureBookmarkAccess)
     .query(async ({ ctx }) => {
       return await ctx.bookmark.getHistory();

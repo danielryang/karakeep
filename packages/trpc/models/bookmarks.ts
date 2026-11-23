@@ -12,7 +12,9 @@ import {
   lt,
   lte,
   ne,
+  notInArray,
   or,
+  sql,
   SQL,
 } from "drizzle-orm";
 import invariant from "tiny-invariant";
@@ -24,6 +26,7 @@ import {
   assets,
   AssetTypes,
   bookmarkAssets,
+  bookmarkHistory,
   bookmarkLinks,
   bookmarks,
   bookmarksInLists,
@@ -31,6 +34,7 @@ import {
   bookmarkTexts,
   rssFeedImportsTable,
   tagsOnBookmarks,
+  users,
 } from "@karakeep/db/schema";
 import {
   deleteAsset,
@@ -41,6 +45,11 @@ import {
 
 import { WebhooksService } from "./webhooks.service";
 import { getAlignedExpiry } from "@karakeep/shared/signedTokens";
+import type { ZBookmarkHistoryEntry } from "@karakeep/shared/types/bookmarkHistory";
+import {
+  BOOKMARK_HISTORY_LISTS_FIELD,
+  OWNER_ONLY_BOOKMARK_HISTORY_FIELDS,
+} from "@karakeep/shared/types/bookmarkHistory";
 import {
   BookmarkTypes,
   DEFAULT_NUM_BOOKMARKS_PER_PAGE,
@@ -95,6 +104,9 @@ const turndownService = new TurndownService({
   bulletListMarker: "-",
   headingStyle: "atx",
 });
+
+// History is returned without pagination; this keeps one response bounded.
+export const MAX_BOOKMARK_HISTORY_ENTRIES = 500;
 
 export class BareBookmark {
   protected constructor(
@@ -154,6 +166,65 @@ export class BareBookmark {
         message: "User is not allowed to access resource",
       });
     }
+  }
+
+  // Newest first, capped at MAX_BOOKMARK_HISTORY_ENTRIES. Callers must have
+  // already checked access (bareFromId does).
+  async getHistory(): Promise<ZBookmarkHistoryEntry[]> {
+    const conditions: SQL[] = [eq(bookmarkHistory.bookmarkId, this.id)];
+
+    if (this.userId !== this.ctx.user.id) {
+      // Collaborators get the same view as Bookmark.asZBookmark: no owner-only
+      // fields. Tags are left visible because getBookmark already shows them.
+      conditions.push(
+        notInArray(bookmarkHistory.field, [
+          ...OWNER_ONLY_BOOKMARK_HISTORY_FIELDS,
+        ]),
+      );
+      // List rows only for lists the viewer can currently see, so they never
+      // learn about the owner's private (or deleted) lists.
+      const viewableListIds = (await List.getAll(this.ctx))
+        .filter((l) => l.canUserView())
+        .map((l) => l.id);
+      const notAListRow = ne(
+        bookmarkHistory.field,
+        BOOKMARK_HISTORY_LISTS_FIELD,
+      );
+      conditions.push(
+        viewableListIds.length > 0
+          ? or(notAListRow, inArray(bookmarkHistory.refId, viewableListIds))!
+          : notAListRow,
+      );
+    }
+
+    const rows = await this.ctx.db
+      .select({
+        id: bookmarkHistory.id,
+        bookmarkId: bookmarkHistory.bookmarkId,
+        field: bookmarkHistory.field,
+        refId: bookmarkHistory.refId,
+        oldValue: bookmarkHistory.oldValue,
+        newValue: bookmarkHistory.newValue,
+        source: bookmarkHistory.source,
+        createdAt: bookmarkHistory.createdAt,
+        userId: users.id,
+        userName: users.name,
+      })
+      .from(bookmarkHistory)
+      .leftJoin(users, eq(users.id, bookmarkHistory.userId))
+      .where(and(...conditions))
+      // Rows written in one batch share a timestamp; rowid keeps them in
+      // insertion order instead of an arbitrary one.
+      .orderBy(
+        desc(bookmarkHistory.createdAt),
+        desc(sql`${bookmarkHistory}.rowid`),
+      )
+      .limit(MAX_BOOKMARK_HISTORY_ENTRIES);
+
+    return rows.map(({ userId, userName, ...row }) => ({
+      ...row,
+      user: userId && userName !== null ? { id: userId, name: userName } : null,
+    }));
   }
 }
 

@@ -42,6 +42,7 @@ import { getRateLimitClient } from "@karakeep/shared/ratelimiting";
 import { FilterQuery, getSearchClient } from "@karakeep/shared/search";
 import { parseSearchQuery } from "@karakeep/shared/searchQueryParser";
 import { buildSummarizationInput } from "@karakeep/shared/summarization";
+import { zBookmarkHistoryEntrySchema } from "@karakeep/shared/types/bookmarkHistory";
 import type {
   ZBookmarkContent,
   ZBookmarkSource,
@@ -1026,6 +1027,21 @@ export const bookmarksAppRouter = router({
       return (
         await Bookmark.fromId(ctx, input.bookmarkId, input.includeContent)
       ).asZBookmark();
+    }),
+  getHistory: bookmarksProcedure
+    .input(z.object({ bookmarkId: z.string() }))
+    .output(z.array(zBookmarkHistoryEntrySchema))
+    // Only enforced when RATE_LIMITING_ENABLED is on.
+    .use(
+      createRateLimitMiddleware({
+        name: "bookmarks.getHistory",
+        windowMs: 60 * 1000,
+        maxRequests: 30,
+      }),
+    )
+    .use(ensureBookmarkAccess)
+    .query(async ({ ctx }) => {
+      return await ctx.bookmark.getHistory();
     }),
   getBookmarkReadableContent: bookmarksProcedure
     .use(createBookmarksQueriedMiddleware())

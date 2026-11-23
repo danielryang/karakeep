@@ -1388,6 +1388,37 @@
     "semantic_placeholder": "Describe what you remember…"
   },
   "preview": {
+    "history": {
+      "title": "History",
+      "set": "Set {{field}}",
+      "cleared": "Cleared {{field}}",
+      "changed": "Changed {{field}}",
+      "tag_added": "Added tag",
+      "tag_removed": "Removed tag",
+      "list_added": "Added to list",
+      "list_removed": "Removed from list",
+      "archived_on": "Archived",
+      "archived_off": "Unarchived",
+      "favourited_on": "Added to favourites",
+      "favourited_off": "Removed from favourites",
+      "by_ai": "AI",
+      "by_rule": "Rule",
+      "by_unknown": "Deleted user",
+      "fields": {
+        "title": "title",
+        "url": "URL",
+        "description": "description",
+        "author": "author",
+        "publisher": "publisher",
+        "datePublished": "published date",
+        "dateModified": "modified date",
+        "createdAt": "saved date",
+        "note": "note",
+        "summary": "summary",
+        "text": "text",
+        "assetContent": "extracted text"
+      }
+    },
     "view_original": "View original",
     "open_on_host": "Open on {{host}}",
     "cached_content": "Cached content",

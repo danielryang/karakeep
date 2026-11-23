@@ -17,6 +17,7 @@ import {
   users,
 } from "@karakeep/db/schema";
 import { parseSearchQuery } from "@karakeep/shared/searchQueryParser";
+import { BOOKMARK_HISTORY_LISTS_FIELD } from "@karakeep/shared/types/bookmarkHistory";
 import { ZSortOrder } from "@karakeep/shared/types/bookmarks";
 import {
   ZBookmarkList,
@@ -29,11 +30,15 @@ import { switchCase } from "@karakeep/shared/utils/switch";
 
 import { AuthedContext, Context } from "..";
 import { buildImpersonatingAuthedContext } from "../lib/impersonate";
+import { recordBookmarkHistory } from "../lib/bookmarkHistory";
 import { RuleEngine } from "../lib/ruleEngine";
 import { getBookmarksConditionFromMatcher } from "../lib/search";
 import { Bookmark } from "./bookmarks";
 import { ListInvitation } from "./listInvitations";
 import { zRuleEngineRuleEventSchema } from "@karakeep/shared/types/rules";
+
+// Who to credit in bookmark history for a membership change.
+type ListHistorySource = "user" | "rule";
 
 interface ListCollaboratorEntry {
   membershipId: string;
@@ -1017,8 +1022,14 @@ export abstract class List {
   // doesn't scope by user, so callers must also filter on `bookmarks.userId`.
   abstract getBookmarksCondition(visitedListIds?: Set<string>): Promise<SQL>;
   abstract getSize(): Promise<number>;
-  abstract addBookmark(bookmarkId: string): Promise<void>;
-  abstract removeBookmark(bookmarkId: string): Promise<void>;
+  abstract addBookmark(
+    bookmarkId: string,
+    source?: ListHistorySource,
+  ): Promise<void>;
+  abstract removeBookmark(
+    bookmarkId: string,
+    source?: ListHistorySource,
+  ): Promise<void>;
   abstract mergeInto(
     targetList: List,
     deleteSourceAfterMerge: boolean,
@@ -1237,14 +1248,27 @@ export class ManualList extends List {
     return results[0].count;
   }
 
-  async addBookmark(bookmarkId: string): Promise<void> {
+  async addBookmark(
+    bookmarkId: string,
+    source: ListHistorySource = "user",
+  ): Promise<void> {
     this.ensureCanEdit();
 
     try {
-      await this.ctx.db.insert(bookmarksInLists).values({
-        listId: this.list.id,
-        bookmarkId,
-        listMembershipId: this.collaboratorEntry?.membershipId,
+      // Membership and its history row commit together. A duplicate add
+      // throws on the insert, so it never reaches the history write.
+      this.ctx.db.transaction((tx) => {
+        tx.insert(bookmarksInLists)
+          .values({
+            listId: this.list.id,
+            bookmarkId,
+            listMembershipId: this.collaboratorEntry?.membershipId,
+          })
+          .run();
+        this.recordListHistory(tx, bookmarkId, source, {
+          oldValue: null,
+          newValue: this.list.name,
+        });
       });
       const bookmark = await this.ctx.db.query.bookmarks.findFirst({
         where: eq(bookmarks.id, bookmarkId),
@@ -1278,18 +1302,31 @@ export class ManualList extends List {
     }
   }
 
-  async removeBookmark(bookmarkId: string): Promise<void> {
+  async removeBookmark(
+    bookmarkId: string,
+    source: ListHistorySource = "user",
+  ): Promise<void> {
     // Check that the user can edit this list
     this.ensureCanEdit();
 
-    const deleted = await this.ctx.db
-      .delete(bookmarksInLists)
-      .where(
-        and(
-          eq(bookmarksInLists.listId, this.list.id),
-          eq(bookmarksInLists.bookmarkId, bookmarkId),
-        ),
-      );
+    const deleted = this.ctx.db.transaction((tx) => {
+      const result = tx
+        .delete(bookmarksInLists)
+        .where(
+          and(
+            eq(bookmarksInLists.listId, this.list.id),
+            eq(bookmarksInLists.bookmarkId, bookmarkId),
+          ),
+        )
+        .run();
+      if (result.changes > 0) {
+        this.recordListHistory(tx, bookmarkId, source, {
+          oldValue: this.list.name,
+          newValue: null,
+        });
+      }
+      return result;
+    });
     if (deleted.changes == 0) {
       throw new TRPCError({
         code: "BAD_REQUEST",
@@ -1314,6 +1351,26 @@ export class ManualList extends List {
         this.ctx.db,
       );
     }
+  }
+
+  // The actor is whoever edited the list, which for a shared list can be a
+  // collaborator rather than the bookmark owner. Rule-driven changes have no
+  // acting user.
+  private recordListHistory(
+    tx: KarakeepDBTransaction,
+    bookmarkId: string,
+    source: ListHistorySource,
+    values: { oldValue: string | null; newValue: string | null },
+  ) {
+    recordBookmarkHistory(
+      tx,
+      {
+        bookmarkId,
+        userId: source === "rule" ? null : this.ctx.user.id,
+        source,
+      },
+      [{ field: BOOKMARK_HISTORY_LISTS_FIELD, refId: this.list.id, ...values }],
+    );
   }
 
   async update(input: z.infer<typeof zEditBookmarkListSchemaWithValidation>) {

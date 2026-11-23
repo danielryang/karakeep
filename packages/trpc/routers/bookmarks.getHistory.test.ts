@@ -64,6 +64,7 @@ async function addAndAcceptCollaborator(
 
 // Owner's bookmark in a list shared with apiCallers[1] under `role`.
 async function setUpSharedBookmark(
+  db: CustomTestContext["db"],
   apiCallers: APICallerType[],
   role: "viewer" | "editor",
 ) {
@@ -82,6 +83,11 @@ async function setUpSharedBookmark(
     sharedList.id,
     role,
   );
+  // Setup itself can write history (adding to a list is recorded once list
+  // history is captured), so start each test from a known-empty history.
+  await db
+    .delete(bookmarkHistory)
+    .where(eq(bookmarkHistory.bookmarkId, bookmark.id));
   return {
     ownerApi,
     collaboratorApi,
@@ -237,6 +243,7 @@ describe("bookmarks.getHistory", () => {
     db,
   }) => {
     const { ownerApi, collaborator, bookmark } = await setUpSharedBookmark(
+      db,
       apiCallers,
       "editor",
     );
@@ -342,7 +349,7 @@ describe("bookmarks.getHistory", () => {
       db,
     }) => {
       const { ownerApi, collaboratorApi, owner, bookmark, sharedList } =
-        await setUpSharedBookmark(apiCallers, role);
+        await setUpSharedBookmark(db, apiCallers, role);
       const privateList = await createList(ownerApi, "Private");
       const deletedList = await createList(ownerApi, "Deleted");
       const strangersList = await createList(apiCallers[2], "Stranger's");
@@ -398,9 +405,10 @@ describe("bookmarks.getHistory", () => {
 
     test<CustomTestContext>("gets NOT_FOUND once removed from the shared list", async ({
       apiCallers,
+      db,
     }) => {
       const { ownerApi, collaboratorApi, collaborator, bookmark, sharedList } =
-        await setUpSharedBookmark(apiCallers, role);
+        await setUpSharedBookmark(db, apiCallers, role);
       await expect(
         collaboratorApi.bookmarks.getHistory({ bookmarkId: bookmark.id }),
       ).resolves.toEqual([]);
@@ -416,9 +424,10 @@ describe("bookmarks.getHistory", () => {
 
     test<CustomTestContext>("gets NOT_FOUND once the bookmark leaves the shared list", async ({
       apiCallers,
+      db,
     }) => {
       const { ownerApi, collaboratorApi, bookmark, sharedList } =
-        await setUpSharedBookmark(apiCallers, role);
+        await setUpSharedBookmark(db, apiCallers, role);
       await ownerApi.lists.removeFromList({
         listId: sharedList.id,
         bookmarkId: bookmark.id,
@@ -437,7 +446,7 @@ describe("bookmarks.getHistory", () => {
     db,
   }) => {
     const { ownerApi, owner, collaborator, bookmark, sharedList } =
-      await setUpSharedBookmark(apiCallers, "viewer");
+      await setUpSharedBookmark(db, apiCallers, "viewer");
     record(db, { bookmarkId: bookmark.id, userId: owner.id, source: "user" }, [
       { field: "title", oldValue: null, newValue: "Title" },
       { field: "note", oldValue: null, newValue: "secret" },

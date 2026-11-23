@@ -24,6 +24,7 @@ import {
 } from "@karakeep/shared/types/rules";
 
 import { AuthedContext } from "..";
+import { recordTagHistory } from "./bookmarkHistoryTags";
 import { List } from "../models/lists";
 import { RuleEngineRuleModel } from "../models/rules";
 
@@ -73,6 +74,16 @@ export class RuleEngine {
     private bookmark: Omit<ReturnedBookmark, "user">,
     private rules: RuleEngineRule[],
   ) {}
+
+  // Rules run on the owner's behalf but nobody clicked anything, so history
+  // attributes them to the rule rather than a user.
+  private get historyActor() {
+    return {
+      bookmarkId: this.bookmark.id,
+      userId: null,
+      source: "rule" as const,
+    };
+  }
 
   private get bookmarkTitle(): string {
     return (
@@ -268,27 +279,45 @@ export class RuleEngine {
   async executeAction(action: RuleEngineAction): Promise<string> {
     switch (action.type) {
       case "addTag": {
-        await this.ctx.db
-          .insert(tagsOnBookmarks)
-          .values([
-            {
-              attachedBy: "human",
-              bookmarkId: this.bookmark.id,
-              tagId: action.tagId,
-            },
-          ])
-          .onConflictDoNothing();
+        this.ctx.db.transaction((tx) => {
+          const attachedTagIds = tx
+            .insert(tagsOnBookmarks)
+            .values([
+              {
+                attachedBy: "human",
+                bookmarkId: this.bookmark.id,
+                tagId: action.tagId,
+              },
+            ])
+            .onConflictDoNothing()
+            .returning({ tagId: tagsOnBookmarks.tagId })
+            .all()
+            .map((r) => r.tagId);
+          recordTagHistory(tx, this.historyActor, {
+            attachedTagIds,
+            detachedTagIds: [],
+          });
+        });
         return `Added tag ${action.tagId}`;
       }
       case "removeTag": {
-        await this.ctx.db
-          .delete(tagsOnBookmarks)
-          .where(
-            and(
-              eq(tagsOnBookmarks.tagId, action.tagId),
-              eq(tagsOnBookmarks.bookmarkId, this.bookmark.id),
-            ),
-          );
+        this.ctx.db.transaction((tx) => {
+          const detachedTagIds = tx
+            .delete(tagsOnBookmarks)
+            .where(
+              and(
+                eq(tagsOnBookmarks.tagId, action.tagId),
+                eq(tagsOnBookmarks.bookmarkId, this.bookmark.id),
+              ),
+            )
+            .returning({ tagId: tagsOnBookmarks.tagId })
+            .all()
+            .map((r) => r.tagId);
+          recordTagHistory(tx, this.historyActor, {
+            attachedTagIds: [],
+            detachedTagIds,
+          });
+        });
         return `Removed tag ${action.tagId}`;
       }
       case "addToList": {

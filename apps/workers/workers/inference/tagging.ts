@@ -28,6 +28,7 @@ import logger from "@karakeep/shared/logger";
 import { buildImagePrompt } from "@karakeep/shared/prompts";
 import { buildTextPrompt } from "@karakeep/shared/prompts.server";
 import { DequeuedJob, EnqueueOptions } from "@karakeep/shared/queueing";
+import { recordTagHistory } from "@karakeep/trpc/lib/bookmarkHistoryTags";
 import { RuleEngine } from "@karakeep/trpc/lib/ruleEngine";
 import { Bookmark } from "@karakeep/trpc/models/bookmarks";
 import { WebhooksService } from "@karakeep/trpc/models/webhooks.service";
@@ -505,6 +506,17 @@ async function connectTags(
           .returning()
           .all();
       }
+
+      // AI tags are replaced wholesale, so a tag that was detached and then
+      // re-attached here is unchanged; recordTagHistory skips those.
+      recordTagHistory(
+        tx,
+        { bookmarkId, userId: null, source: "ai" },
+        {
+          attachedTagIds: attachedTags.map((t) => t.tagId),
+          detachedTagIds: detachedTags.map((t) => t.tagId),
+        },
+      );
 
       return { detachedTags, attachedTags };
     },

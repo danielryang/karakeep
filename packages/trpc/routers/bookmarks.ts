@@ -76,6 +76,7 @@ import {
   emitRateLimitedEvent,
   router,
 } from "../index";
+import { recordTagHistory } from "../lib/bookmarkHistoryTags";
 import { RuleEngine } from "../lib/ruleEngine";
 import { getBookmarkIdsFromMatcher } from "../lib/search";
 import { reciprocalRankFusion } from "../lib/searchRanking";
@@ -1458,9 +1459,12 @@ export const bookmarksAppRouter = router({
 
       const res = await ctx.db.transaction((tx) => {
         let numChanges = 0;
+        // Track which rows actually changed so history skips no-op attaches/detaches.
+        let detachedTagIds: string[] = [];
+        let attachedTagIds: string[] = [];
         // Detaches
         if (idsToRemove.length > 0) {
-          const res = tx
+          detachedTagIds = tx
             .delete(tagsOnBookmarks)
             .where(
               and(
@@ -1468,13 +1472,15 @@ export const bookmarksAppRouter = router({
                 inArray(tagsOnBookmarks.tagId, idsToRemove),
               ),
             )
-            .run();
-          numChanges += res.changes;
+            .returning({ tagId: tagsOnBookmarks.tagId })
+            .all()
+            .map((r) => r.tagId);
+          numChanges += detachedTagIds.length;
         }
 
         // Attach tags
         if (allIdsToAttach.length > 0) {
-          const res = tx
+          attachedTagIds = tx
             .insert(tagsOnBookmarks)
             .values(
               allIdsToAttach.map((i) => ({
@@ -1484,9 +1490,17 @@ export const bookmarksAppRouter = router({
               })),
             )
             .onConflictDoNothing()
-            .run();
-          numChanges += res.changes;
+            .returning({ tagId: tagsOnBookmarks.tagId })
+            .all()
+            .map((r) => r.tagId);
+          numChanges += attachedTagIds.length;
         }
+
+        recordTagHistory(
+          tx,
+          { bookmarkId: input.bookmarkId, userId: ctx.user.id, source: "user" },
+          { attachedTagIds, detachedTagIds },
+        );
 
         // Update bookmark modified timestamp
         if (numChanges > 0) {
